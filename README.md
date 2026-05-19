@@ -6,9 +6,9 @@ developer-defined schema and fires a signed webhook at your application.
 
 Implemented so far: **Step 1** the core inbound loop (schema +
 `/api/v1/inbound-email`), **Step 2** reliable delivery (automatic retry
-with exponential backoff + manual replay), and **Step 3** the
-authenticated management API (endpoint CRUD, secret rotation, log
-inspection). No landing page, billing, or dashboard UI yet.
+with exponential backoff + manual replay), **Step 3** the authenticated
+management API (endpoint CRUD, secret rotation, log inspection), and
+**Step 4** the dashboard UI. No landing page or billing yet.
 
 ## Architecture
 
@@ -44,6 +44,13 @@ Vercel Cron (*/5 * * * *)
 | `src/app/api/v1/endpoints/[id]/rotate-secret/route.ts` | Rotate webhook secret |
 | `src/app/api/v1/endpoints/[id]/logs/route.ts` | Paginated endpoint logs |
 | `src/app/api/v1/logs/[id]/route.ts` | Single full log |
+| `src/app/login/page.tsx` | Email/password auth (Supabase browser) |
+| `src/app/page.tsx` | Dashboard: list + create endpoints |
+| `src/app/endpoints/[id]/page.tsx` | Edit/delete, rotate secret, logs |
+| `src/app/logs/[id]/page.tsx` | Full log (raw + parsed) view |
+| `src/components/AuthGate.tsx` | Client session guard |
+| `src/lib/api-client.ts` | Browser fetch wrapper (injects JWT) |
+| `src/lib/supabase-browser.ts` | Browser Supabase client |
 | `src/lib/auth.ts` | Supabase-JWT auth → RLS-scoped client |
 | `src/lib/validation.ts` | Slug/secret generation + input checks |
 | `src/lib/dispatch.ts` | Shared sign + deliver (inbound & retry) |
@@ -244,3 +251,28 @@ curl "http://localhost:3000/api/v1/endpoints/<id>/logs?status=failed_delivery&li
 
 Validation errors return `400`, slug collisions `409`, missing/owned-by-
 someone-else resources `404`, and bad/expired tokens `401`.
+
+## Dashboard UI (Step 4)
+
+A client-rendered Next.js dashboard over the Step 3 API. Auth is handled
+in the browser by Supabase (`@supabase/supabase-js`); the session JWT is
+forwarded to every API call, so RLS still enforces ownership.
+
+Set the browser-exposed env vars (in addition to the server ones):
+
+```
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```
+
+Then `npm run dev` and open <http://localhost:3000>:
+
+- `/login` — email/password sign in & sign up.
+- `/` — list endpoints, create a new one.
+- `/endpoints/{id}` — edit config, toggle active, rotate the webhook
+  secret, view the inbound address, browse logs (filter by status).
+- `/logs/{id}` — status, retries, error, parsed JSON, raw payload.
+
+> Manual replay stays an operator action guarded by `CRON_SECRET` and is
+> intentionally not exposed in the user dashboard; the cron worker
+> already auto-retries failed deliveries.
