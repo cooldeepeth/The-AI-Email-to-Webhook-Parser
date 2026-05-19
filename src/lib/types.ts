@@ -27,7 +27,8 @@ export type WebhookLogStatus =
   | "processing"
   | "success"
   | "failed_ai"
-  | "failed_delivery";
+  | "failed_delivery"
+  | "quota_exceeded";
 
 export interface EndpointRow {
   id: string;

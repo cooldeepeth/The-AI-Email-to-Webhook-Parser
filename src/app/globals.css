@@ -150,7 +150,8 @@ th {
   border-color: var(--ok);
 }
 .badge.failed_delivery,
-.badge.failed_ai {
+.badge.failed_ai,
+.badge.quota_exceeded {
   color: var(--danger);
   border-color: var(--danger);
 }

@@ -15,9 +15,18 @@ interface EndpointSummary {
   created_at: string;
 }
 
+interface Usage {
+  plan: string;
+  monthly_quota: number;
+  used: number;
+  remaining: number;
+  period_start: string;
+}
+
 function Dashboard() {
   const router = useRouter();
   const [endpoints, setEndpoints] = useState<EndpointSummary[]>([]);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -30,10 +39,12 @@ function Dashboard() {
     setLoading(true);
     setErr(null);
     try {
-      const res = await api<{ endpoints: EndpointSummary[] }>(
-        "/api/v1/endpoints",
-      );
-      setEndpoints(res.endpoints);
+      const [eps, use] = await Promise.all([
+        api<{ endpoints: EndpointSummary[] }>("/api/v1/endpoints"),
+        api<{ usage: Usage }>("/api/v1/usage"),
+      ]);
+      setEndpoints(eps.endpoints);
+      setUsage(use.usage);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load endpoints");
     } finally {
@@ -82,6 +93,21 @@ function Dashboard() {
           Sign out
         </button>
       </div>
+
+      {usage && (
+        <div className="panel">
+          <h2>Usage</h2>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span>
+              Plan: <strong>{usage.plan}</strong>
+            </span>
+            <span className={usage.remaining === 0 ? "error" : "muted"}>
+              {usage.used} / {usage.monthly_quota} parsed this month (
+              {usage.remaining} left)
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
         <h2>New endpoint</h2>

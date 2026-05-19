@@ -10,6 +10,7 @@ const STATUSES = new Set([
   "success",
   "failed_ai",
   "failed_delivery",
+  "quota_exceeded",
 ]);
 
 // Summary columns only — raw/parsed payloads are fetched per-log.

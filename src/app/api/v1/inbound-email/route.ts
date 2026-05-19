@@ -146,7 +146,32 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 3. Log the initial 'processing' state.
+  // 3. Enforce the account's monthly quota before any paid AI work.
+  // Counting happens here (an accepted email) so rejected/over-quota
+  // mail is recorded but never consumes an LLM call.
+  const { data: quota, error: quotaError } = await supabase
+    .rpc("record_usage_and_check", { p_user_id: endpoint.user_id })
+    .single<{ allowed: boolean; used: number; monthly_quota: number }>();
+
+  if (quotaError || !quota) {
+    return jsonResponse(500, { ok: false, error: "usage_check_failed" });
+  }
+  if (!quota.allowed) {
+    await supabase.from("webhook_logs").insert({
+      endpoint_id: endpoint.id,
+      status: "quota_exceeded" as WebhookLogStatus,
+      raw_email_payload: sanitizePayload(payload),
+      error_message: `monthly quota exceeded (${quota.used}/${quota.monthly_quota})`,
+    });
+    return jsonResponse(200, {
+      ok: false,
+      error: "quota_exceeded",
+      used: quota.used,
+      monthly_quota: quota.monthly_quota,
+    });
+  }
+
+  // 4. Log the initial 'processing' state.
   const { data: logRow, error: insertError } = await supabase
     .from("webhook_logs")
     .insert({
@@ -172,7 +197,7 @@ export async function POST(req: NextRequest) {
     }
   };
 
-  // 4. AI parsing.
+  // 5. AI parsing.
   const emailBody =
     payload.TextBody?.trim() ||
     payload.StrippedTextReply?.trim() ||
@@ -200,7 +225,7 @@ export async function POST(req: NextRequest) {
 
   await updateLog({ parsed_json_output: parsedJson });
 
-  // 5. Dispatch the signed webhook to the developer's server.
+  // 6. Dispatch the signed webhook to the developer's server.
   const outboundBody = buildOutboundBody({
     endpointId: endpoint.id,
     logId,
@@ -220,7 +245,7 @@ export async function POST(req: NextRequest) {
     outboundBody,
   );
 
-  // 6. Final log update based on the developer server's response.
+  // 7. Final log update based on the developer server's response.
   // A failed delivery stays in 'failed_delivery' for the cron retry
   // worker; retry_count starts at 0 (no attempts beyond this one yet).
   await updateLog({

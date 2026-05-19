@@ -7,8 +7,9 @@ developer-defined schema and fires a signed webhook at your application.
 Implemented so far: **Step 1** the core inbound loop (schema +
 `/api/v1/inbound-email`), **Step 2** reliable delivery (automatic retry
 with exponential backoff + manual replay), **Step 3** the authenticated
-management API (endpoint CRUD, secret rotation, log inspection), and
-**Step 4** the dashboard UI. No landing page or billing yet.
+management API (endpoint CRUD, secret rotation, log inspection),
+**Step 4** the dashboard UI, and **Step 5** usage metering + monthly
+plan quotas. No landing page or Stripe billing yet.
 
 ## Architecture
 
@@ -36,6 +37,8 @@ Vercel Cron (*/5 * * * *)
 | Path | Purpose |
 | --- | --- |
 | `supabase/migrations/0001_initial_schema.sql` | Full Postgres DDL + RLS |
+| `supabase/migrations/0002_usage_and_plans.sql` | Plans, usage counters, quota fn |
+| `src/app/api/v1/usage/route.ts` | Plan + month-to-date usage |
 | `src/app/api/v1/inbound-email/route.ts` | The inbound loop handler |
 | `src/app/api/v1/cron/retry-deliveries/route.ts` | Backoff retry worker |
 | `src/app/api/v1/logs/[id]/replay/route.ts` | Manual single-log replay |
@@ -276,3 +279,29 @@ Then `npm run dev` and open <http://localhost:3000>:
 > Manual replay stays an operator action guarded by `CRON_SECRET` and is
 > intentionally not exposed in the user dashboard; the cron worker
 > already auto-retries failed deliveries.
+
+## Usage metering & quotas (Step 5)
+
+Every accepted email is metered per account, per calendar month, and
+checked against the account's plan quota **before** any paid LLM call.
+
+- **Plans:** `plan_tier` enum (`free` / `pro` / `scale`). A `free`
+  account (100/month default) is provisioned lazily on the first email
+  via `record_usage_and_check()` — a `SECURITY DEFINER` function that
+  atomically rolls the billing period, rejects without incrementing when
+  the quota is hit, otherwise counts and returns the new total.
+- **Enforcement:** in the inbound route this runs right after endpoint
+  match. Over quota → a `quota_exceeded` log row is written and `200`
+  is returned to Postmark (retrying would not help), with **no** LLM
+  spend. Rejected mail is recorded but never counted.
+- **Visibility:** `GET /api/v1/usage` (user JWT) returns
+  `{ plan, monthly_quota, used, remaining, period_start }`; the
+  dashboard shows a usage bar and the log filter includes
+  `quota_exceeded`.
+- **Changing a plan/quota today:** update the account's row, e.g.
+  `update billing_accounts set plan='pro', monthly_quota=10000 where user_id='…';`
+  Stripe-driven plan changes are the next step.
+
+> Quotas live in the DB (per-account), not env, so they can change
+> without a deploy. The check is intentionally before AI work so an
+> abusive or runaway sender cannot run up an API bill.

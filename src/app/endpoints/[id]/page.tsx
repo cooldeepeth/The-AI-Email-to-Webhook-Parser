@@ -31,6 +31,7 @@ const STATUSES = [
   "success",
   "failed_ai",
   "failed_delivery",
+  "quota_exceeded",
 ];
 
 function Detail() {
