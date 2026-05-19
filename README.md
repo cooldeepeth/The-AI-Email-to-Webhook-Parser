@@ -4,10 +4,11 @@ Route fragile, automated emails (supplier invoices, real-estate leads, CSV
 alerts) to thook. thook extracts structured data with an LLM against a
 developer-defined schema and fires a signed webhook at your application.
 
-This repository currently implements **Step 1: the core inbound loop** —
-the database schema, the `/api/v1/inbound-email` route handler, and
-**Step 2: reliable delivery** (automatic retry with exponential backoff
-+ manual replay). No landing page, billing, or dashboard yet.
+Implemented so far: **Step 1** the core inbound loop (schema +
+`/api/v1/inbound-email`), **Step 2** reliable delivery (automatic retry
+with exponential backoff + manual replay), and **Step 3** the
+authenticated management API (endpoint CRUD, secret rotation, log
+inspection). No landing page, billing, or dashboard UI yet.
 
 ## Architecture
 
@@ -38,6 +39,13 @@ Vercel Cron (*/5 * * * *)
 | `src/app/api/v1/inbound-email/route.ts` | The inbound loop handler |
 | `src/app/api/v1/cron/retry-deliveries/route.ts` | Backoff retry worker |
 | `src/app/api/v1/logs/[id]/replay/route.ts` | Manual single-log replay |
+| `src/app/api/v1/endpoints/route.ts` | List / create endpoints |
+| `src/app/api/v1/endpoints/[id]/route.ts` | Get / update / delete endpoint |
+| `src/app/api/v1/endpoints/[id]/rotate-secret/route.ts` | Rotate webhook secret |
+| `src/app/api/v1/endpoints/[id]/logs/route.ts` | Paginated endpoint logs |
+| `src/app/api/v1/logs/[id]/route.ts` | Single full log |
+| `src/lib/auth.ts` | Supabase-JWT auth → RLS-scoped client |
+| `src/lib/validation.ts` | Slug/secret generation + input checks |
 | `src/lib/dispatch.ts` | Shared sign + deliver (inbound & retry) |
 | `src/lib/retry.ts` | Exponential-backoff eligibility |
 | `src/lib/ai.ts` | Anthropic / OpenAI provider + robust JSON extraction |
@@ -198,3 +206,41 @@ curl -X POST "http://localhost:3000/api/v1/logs/<log-uuid>/replay" \
 > snippet above continue to validate correctly. The outbound JSON body
 > is rebuilt deterministically from the stored log, so retried payloads
 > are identical to the original.
+
+## Management API (Step 3)
+
+All routes require a Supabase **user** JWT
+(`Authorization: Bearer <access_token>`). The token is used to build the
+Supabase client, so every query runs under the owner-scoped RLS policies
+from the migration — authorization is enforced by Postgres, not
+re-implemented in the API. Get a token from your Supabase auth flow
+(e.g. `supabase.auth.signInWithPassword`).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/endpoints` | List your endpoints (no secrets) |
+| `POST` | `/api/v1/endpoints` | Create (slug auto-generated if omitted) |
+| `GET` | `/api/v1/endpoints/{id}` | Get one (includes `webhook_secret`) |
+| `PATCH` | `/api/v1/endpoints/{id}` | Partial update of mutable fields |
+| `DELETE` | `/api/v1/endpoints/{id}` | Delete (cascades its logs) |
+| `POST` | `/api/v1/endpoints/{id}/rotate-secret` | New `webhook_secret` (shown once) |
+| `GET` | `/api/v1/endpoints/{id}/logs` | Logs, `?status=&limit=&offset=` |
+| `GET` | `/api/v1/logs/{id}` | One log incl. raw + parsed payloads |
+
+```bash
+TOKEN="<supabase-user-access-token>"
+
+# create an endpoint
+curl -X POST http://localhost:3000/api/v1/endpoints \
+  -H "authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -d '{"name":"Supplier Invoice Parser",
+       "target_webhook_url":"https://webhook.site/<uuid>",
+       "ai_prompt_schema":"Extract total_amount, invoice_date, vendor_name."}'
+
+# list its recent failed deliveries
+curl "http://localhost:3000/api/v1/endpoints/<id>/logs?status=failed_delivery&limit=20" \
+  -H "authorization: Bearer $TOKEN"
+```
+
+Validation errors return `400`, slug collisions `409`, missing/owned-by-
+someone-else resources `404`, and bad/expired tokens `401`.

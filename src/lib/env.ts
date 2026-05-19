@@ -27,6 +27,11 @@ export const env = {
     return required("SUPABASE_SERVICE_ROLE_KEY");
   },
 
+  /** Public anon key — used with the caller's JWT so RLS is enforced. */
+  get supabaseAnonKey() {
+    return required("SUPABASE_ANON_KEY");
+  },
+
   /** Shared secret Postmark must present (HTTP Basic password or ?token=). */
   get postmarkInboundToken() {
     return required("POSTMARK_INBOUND_WEBHOOK_TOKEN");
