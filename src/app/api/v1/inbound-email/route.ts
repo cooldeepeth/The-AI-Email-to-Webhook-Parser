@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
 import { getServiceClient } from "@/lib/supabase";
 import { parseEmailWithAi } from "@/lib/ai";
-import { signPayload } from "@/lib/signature";
+import { buildOutboundBody, deliver } from "@/lib/dispatch";
 import type {
   EndpointRow,
   PostmarkInboundPayload,
@@ -201,10 +201,10 @@ export async function POST(req: NextRequest) {
   await updateLog({ parsed_json_output: parsedJson });
 
   // 5. Dispatch the signed webhook to the developer's server.
-  const outboundBody = JSON.stringify({
-    endpoint_id: endpoint.id,
-    log_id: logId,
-    received_at: payload.Date ?? new Date().toISOString(),
+  const outboundBody = buildOutboundBody({
+    endpointId: endpoint.id,
+    logId,
+    receivedAt: payload.Date ?? new Date().toISOString(),
     source: {
       from: payload.FromFull?.Email ?? payload.From ?? null,
       subject: payload.Subject ?? null,
@@ -212,73 +212,29 @@ export async function POST(req: NextRequest) {
     },
     data: parsedJson,
   });
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const signature = signPayload(
+
+  const result = await deliver(
+    endpoint.target_webhook_url,
     endpoint.webhook_secret,
+    logId,
     outboundBody,
-    timestamp,
   );
-
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(),
-    env.webhookTimeoutMs,
-  );
-
-  let httpStatus: number | null = null;
-  try {
-    const res = await fetch(endpoint.target_webhook_url, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "content-type": "application/json",
-        "user-agent": "thook-webhook/1.0",
-        "x-thook-timestamp": timestamp,
-        "x-thook-signature": signature,
-        "x-thook-log-id": logId,
-      },
-      body: outboundBody,
-    });
-    httpStatus = res.status;
-    // Drain the body so the connection can be reused/closed cleanly.
-    await res.text().catch(() => "");
-  } catch (err) {
-    const message =
-      err instanceof Error && err.name === "AbortError"
-        ? `timeout after ${env.webhookTimeoutMs}ms`
-        : err instanceof Error
-          ? err.message
-          : "unknown delivery failure";
-    await updateLog({
-      status: "failed_delivery" as WebhookLogStatus,
-      http_response_code: null,
-      error_message: message.slice(0, 2000),
-    });
-    return jsonResponse(200, {
-      ok: false,
-      stage: "delivery",
-      error: message,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
 
   // 6. Final log update based on the developer server's response.
-  const delivered = httpStatus >= 200 && httpStatus < 300;
+  // A failed delivery stays in 'failed_delivery' for the cron retry
+  // worker; retry_count starts at 0 (no attempts beyond this one yet).
   await updateLog({
-    status: (delivered
+    status: (result.delivered
       ? "success"
       : "failed_delivery") as WebhookLogStatus,
-    http_response_code: httpStatus,
-    error_message: delivered
-      ? null
-      : `developer server responded ${httpStatus}`,
+    http_response_code: result.httpStatus,
+    error_message: result.errorMessage?.slice(0, 2000) ?? null,
   });
 
   return jsonResponse(200, {
-    ok: delivered,
+    ok: result.delivered,
     log_id: logId,
-    http_response_code: httpStatus,
+    http_response_code: result.httpStatus,
   });
 }
 

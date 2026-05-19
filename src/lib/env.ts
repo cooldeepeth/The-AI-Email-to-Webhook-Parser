@@ -67,4 +67,25 @@ export const env = {
   get webhookTimeoutMs() {
     return Number(optional("WEBHOOK_TIMEOUT_MS", "15000"));
   },
+
+  /** Shared secret for the cron retry worker and manual replay routes. */
+  get cronSecret() {
+    return required("CRON_SECRET");
+  },
+  get maxDeliveryRetries() {
+    return Number(optional("MAX_DELIVERY_RETRIES", "5"));
+  },
+  /** Per-attempt backoff in minutes, indexed by retry_count. */
+  get retryBackoffMinutes(): number[] {
+    const raw = optional("RETRY_BACKOFF_MINUTES", "1,5,15,60,180");
+    const parsed = raw
+      .split(",")
+      .map((n) => Number(n.trim()))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    return parsed.length > 0 ? parsed : [1, 5, 15, 60, 180];
+  },
+  /** Max logs processed per cron invocation. */
+  get retryBatchSize() {
+    return Number(optional("RETRY_BATCH_SIZE", "25"));
+  },
 } as const;

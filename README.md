@@ -5,10 +5,11 @@ alerts) to thook. thook extracts structured data with an LLM against a
 developer-defined schema and fires a signed webhook at your application.
 
 This repository currently implements **Step 1: the core inbound loop** —
-the database schema and the `/api/v1/inbound-email` route handler. No
-landing page, billing, or dashboard yet.
+the database schema, the `/api/v1/inbound-email` route handler, and
+**Step 2: reliable delivery** (automatic retry with exponential backoff
++ manual replay). No landing page, billing, or dashboard yet.
 
-## Architecture (Step 1)
+## Architecture
 
 ```
 Postmark inbound webhook
@@ -20,6 +21,13 @@ Postmark inbound webhook
 4. AI parse: ai_prompt_schema + email body  ->  strict JSON
 5. Dispatch: HMAC-SHA256 sign  ->  POST target_webhook_url
 6. Update webhook_logs (success | failed_ai | failed_delivery)
+
+Vercel Cron (*/5 * * * *)
+        │  POST /api/v1/cron/retry-deliveries  (auth: Bearer CRON_SECRET)
+        ▼
+   Re-deliver every 'failed_delivery' log whose backoff window has
+   elapsed (retry_count < MAX_DELIVERY_RETRIES); flip to 'success' or
+   bump retry_count. Manual one-off replay: POST /api/v1/logs/{id}/replay
 ```
 
 ## Project layout
@@ -28,10 +36,15 @@ Postmark inbound webhook
 | --- | --- |
 | `supabase/migrations/0001_initial_schema.sql` | Full Postgres DDL + RLS |
 | `src/app/api/v1/inbound-email/route.ts` | The inbound loop handler |
+| `src/app/api/v1/cron/retry-deliveries/route.ts` | Backoff retry worker |
+| `src/app/api/v1/logs/[id]/replay/route.ts` | Manual single-log replay |
+| `src/lib/dispatch.ts` | Shared sign + deliver (inbound & retry) |
+| `src/lib/retry.ts` | Exponential-backoff eligibility |
 | `src/lib/ai.ts` | Anthropic / OpenAI provider + robust JSON extraction |
 | `src/lib/signature.ts` | HMAC-SHA256 payload signing |
 | `src/lib/supabase.ts` | Service-role client |
 | `src/lib/env.ts` | Lazily validated env access |
+| `vercel.json` | Cron schedule for the retry worker |
 
 ## 1. Database setup
 
@@ -149,6 +162,39 @@ Postmark (so it does not retry an inherently undeliverable email):
 `401` is returned only for a bad inbound token; `400` only for a
 malformed JSON body.
 
-> **Production note:** Step 1 runs the LLM + delivery inline. A future
-> step moves dispatch to a background queue with retry/backoff
-> (`retry_count` is already in the schema).
+## Delivery retries (Step 2)
+
+A `failed_delivery` log is not terminal. The cron worker re-attempts it
+with exponential backoff until it succeeds or hits the retry ceiling.
+
+- **Eligibility:** `status = 'failed_delivery'` AND
+  `retry_count < MAX_DELIVERY_RETRIES` AND at least
+  `RETRY_BACKOFF_MINUTES[retry_count]` elapsed since the last attempt
+  (`updated_at`, maintained by trigger).
+- **Outcome:** 2xx → `success`; otherwise `retry_count++` and the error
+  is recorded. An endpoint that was deleted/disabled (or a log with no
+  parsed output) is parked at the retry ceiling instead of looping.
+- **Schedule:** `vercel.json` runs the worker every 5 minutes. Vercel
+  injects `Authorization: Bearer $CRON_SECRET` automatically when the
+  `CRON_SECRET` env var is set on the project.
+
+Trigger it manually (e.g. locally) the same way Vercel does:
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/cron/retry-deliveries" \
+  -H "authorization: Bearer $CRON_SECRET"
+```
+
+Replay one specific log on demand (operator action — does not change
+`retry_count`):
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/logs/<log-uuid>/replay" \
+  -H "authorization: Bearer $CRON_SECRET"
+```
+
+> The retry worker re-signs each attempt with a fresh
+> `X-Thook-Timestamp`, so receivers using the timestamped verification
+> snippet above continue to validate correctly. The outbound JSON body
+> is rebuilt deterministically from the stored log, so retried payloads
+> are identical to the original.
