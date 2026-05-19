@@ -156,3 +156,22 @@ export async function parseEmailWithAi(
     ? callOpenAi(input)
     : callAnthropic(input);
 }
+
+/**
+ * Is an AI failure worth re-queuing? Transient: request timeout, rate
+ * limit, provider 5xx, network error, or a flaky non-JSON response (a
+ * re-run often fixes formatting). Terminal: other 4xx (bad request,
+ * auth, model not found) — retrying cannot help.
+ */
+export function isTransientAiError(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  if (err.name === "AbortError") return true; // hit aiTimeoutMs
+  const message = err.message;
+  if (/parseable JSON object/i.test(message)) return true;
+  const status = message.match(/API (\d{3})/);
+  if (status) {
+    const code = Number(status[1]);
+    return code === 408 || code === 429 || code >= 500;
+  }
+  return true; // fetch/network failure
+}

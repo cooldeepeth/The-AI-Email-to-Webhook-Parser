@@ -156,7 +156,8 @@ th {
   border-color: var(--danger);
 }
 .badge.processing,
-.badge.received {
+.badge.received,
+.badge.pending {
   color: var(--muted);
 }
 

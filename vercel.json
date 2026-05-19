@@ -2,6 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     {
+      "path": "/api/v1/cron/process-pending",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/v1/cron/retry-deliveries",
       "schedule": "*/5 * * * *"
     }

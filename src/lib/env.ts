@@ -94,6 +94,22 @@ export const env = {
     return Number(optional("RETRY_BATCH_SIZE", "25"));
   },
 
+  /**
+   * Max 'pending' logs the async worker claims per run. Kept small: each
+   * one may spend up to aiTimeoutMs + webhookTimeoutMs, and the run must
+   * finish inside the serverless maxDuration.
+   */
+  get aiProcessBatchSize() {
+    return Number(optional("AI_PROCESS_BATCH_SIZE", "5"));
+  },
+  /**
+   * A row left in 'processing' longer than this (a worker that crashed
+   * mid-batch) is reclaimed by the next run.
+   */
+  get processingStaleMinutes() {
+    return Number(optional("PROCESSING_STALE_MINUTES", "5"));
+  },
+
   // --- Stripe billing ---
   get stripeSecretKey() {
     return required("STRIPE_SECRET_KEY");

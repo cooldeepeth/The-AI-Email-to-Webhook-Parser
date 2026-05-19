@@ -24,6 +24,7 @@ export interface PostmarkInboundPayload {
 
 export type WebhookLogStatus =
   | "received"
+  | "pending"
   | "processing"
   | "success"
   | "failed_ai"

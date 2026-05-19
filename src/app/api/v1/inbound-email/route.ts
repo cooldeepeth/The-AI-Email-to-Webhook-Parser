@@ -2,15 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
 import { getServiceClient } from "@/lib/supabase";
-import { parseEmailWithAi } from "@/lib/ai";
-import { buildOutboundBody, deliver } from "@/lib/dispatch";
 import type {
   EndpointRow,
   PostmarkInboundPayload,
   WebhookLogStatus,
 } from "@/lib/types";
 
-// HMAC + outbound fetch require the Node runtime (not Edge).
+// Service-role writes require the Node runtime (not Edge). This route is
+// now I/O-only: it persists the raw payload and returns immediately, so
+// it is in no danger of the serverless timeout. AI parsing and outbound
+// dispatch happen in /api/v1/cron/process-pending.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -171,12 +172,15 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 4. Log the initial 'processing' state.
+  // 4. Persist the raw payload as 'pending' and return immediately.
+  // The cron worker (process-pending) does the LLM parse + dispatch.
+  // A 5xx here makes Postmark redeliver, which is what we want if we
+  // failed to even durably store the email.
   const { data: logRow, error: insertError } = await supabase
     .from("webhook_logs")
     .insert({
       endpoint_id: endpoint.id,
-      status: "processing" as WebhookLogStatus,
+      status: "pending" as WebhookLogStatus,
       raw_email_payload: sanitizePayload(payload),
     })
     .select("id")
@@ -185,81 +189,11 @@ export async function POST(req: NextRequest) {
   if (insertError || !logRow) {
     return jsonResponse(500, { ok: false, error: "log_insert_failed" });
   }
-  const logId = logRow.id;
-
-  const updateLog = async (patch: Record<string, unknown>) => {
-    const { error } = await supabase
-      .from("webhook_logs")
-      .update(patch)
-      .eq("id", logId);
-    if (error) {
-      console.error(`[thook] failed to update log ${logId}:`, error.message);
-    }
-  };
-
-  // 5. AI parsing.
-  const emailBody =
-    payload.TextBody?.trim() ||
-    payload.StrippedTextReply?.trim() ||
-    payload.HtmlBody?.trim() ||
-    "";
-
-  let parsedJson: Record<string, unknown>;
-  try {
-    const result = await parseEmailWithAi({
-      schemaInstructions: endpoint.ai_prompt_schema,
-      subject: payload.Subject ?? "",
-      from: payload.FromFull?.Email ?? payload.From ?? "",
-      body: emailBody,
-    });
-    parsedJson = result.json;
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "unknown AI failure";
-    await updateLog({
-      status: "failed_ai" as WebhookLogStatus,
-      error_message: message.slice(0, 2000),
-    });
-    return jsonResponse(200, { ok: false, stage: "ai", error: message });
-  }
-
-  await updateLog({ parsed_json_output: parsedJson });
-
-  // 6. Dispatch the signed webhook to the developer's server.
-  const outboundBody = buildOutboundBody({
-    endpointId: endpoint.id,
-    logId,
-    receivedAt: payload.Date ?? new Date().toISOString(),
-    source: {
-      from: payload.FromFull?.Email ?? payload.From ?? null,
-      subject: payload.Subject ?? null,
-      message_id: payload.MessageID ?? null,
-    },
-    data: parsedJson,
-  });
-
-  const result = await deliver(
-    endpoint.target_webhook_url,
-    endpoint.webhook_secret,
-    logId,
-    outboundBody,
-  );
-
-  // 7. Final log update based on the developer server's response.
-  // A failed delivery stays in 'failed_delivery' for the cron retry
-  // worker; retry_count starts at 0 (no attempts beyond this one yet).
-  await updateLog({
-    status: (result.delivered
-      ? "success"
-      : "failed_delivery") as WebhookLogStatus,
-    http_response_code: result.httpStatus,
-    error_message: result.errorMessage?.slice(0, 2000) ?? null,
-  });
 
   return jsonResponse(200, {
-    ok: result.delivered,
-    log_id: logId,
-    http_response_code: result.httpStatus,
+    ok: true,
+    status: "pending",
+    log_id: logRow.id,
   });
 }
 

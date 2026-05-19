@@ -9,10 +9,17 @@ Implemented so far: **Step 1** the core inbound loop (schema +
 with exponential backoff + manual replay), **Step 3** the authenticated
 management API (endpoint CRUD, secret rotation, log inspection),
 **Step 4** the dashboard UI, **Step 5** usage metering + monthly
-plan quotas, and **Step 6** Stripe billing (Checkout / portal / webhook
-plan-flip) behind a deliberately tiny pricing page. No landing page yet.
+plan quotas, **Step 6** Stripe billing (Checkout / portal / webhook
+plan-flip) behind a deliberately tiny pricing page, and **Step 7** the
+async processing queue (the inbound route no longer does LLM work
+inline). No landing page yet.
 
 ## Architecture
+
+The inbound route is intentionally I/O-only — it persists the email and
+returns instantly, so a slow LLM call or slow destination can never
+trip the serverless timeout. All parsing/dispatch is drained by a cron
+worker off a claim-based Postgres queue.
 
 ```
 Postmark inbound webhook
@@ -20,10 +27,21 @@ Postmark inbound webhook
         ▼
 1. Receive & validate Postmark payload
 2. Match active endpoint by recipient slug (slug@inbound.thook.io)
-3. Insert webhook_logs row (status = processing)
-4. AI parse: ai_prompt_schema + email body  ->  strict JSON
-5. Dispatch: HMAC-SHA256 sign  ->  POST target_webhook_url
-6. Update webhook_logs (success | failed_ai | failed_delivery)
+3. Enforce monthly quota (record_usage_and_check)
+4. Insert webhook_logs row (status = pending) + return 200 immediately
+
+Vercel Cron (* * * * *)
+        │  POST /api/v1/cron/process-pending  (auth: Bearer CRON_SECRET)
+        ▼
+   claim_pending_logs() atomically flips a small batch to 'processing'
+   (FOR UPDATE SKIP LOCKED — overlap-safe; also reclaims rows stuck in
+   'processing' > PROCESSING_STALE_MINUTES, i.e. a crashed worker):
+     • AI parse  -> on success: dispatch (HMAC-SHA256 signed POST)
+                    -> success | failed_delivery
+     • transient AI failure (timeout / 429 / 5xx / network / flaky
+       JSON)  -> re-queued to 'pending' with backoff via next_retry_at,
+       capped by MAX_DELIVERY_RETRIES, then 'failed_ai'
+     • hard AI failure (4xx / auth)  -> 'failed_ai' (terminal)
 
 Vercel Cron (*/5 * * * *)
         │  POST /api/v1/cron/retry-deliveries  (auth: Bearer CRON_SECRET)
@@ -40,6 +58,7 @@ Vercel Cron (*/5 * * * *)
 | `supabase/migrations/0001_initial_schema.sql` | Full Postgres DDL + RLS |
 | `supabase/migrations/0002_usage_and_plans.sql` | Plans, usage counters, quota fn |
 | `supabase/migrations/0003_billing_stripe.sql` | Stripe linkage + `set_account_plan` |
+| `supabase/migrations/0004_async_processing_queue.sql` | `pending` status + `claim_pending_logs` |
 | `src/lib/plans.ts` | The 3-plan matrix (quotas, Pro price) |
 | `src/lib/stripe.ts` | Lazy Stripe client |
 | `src/app/pricing/page.tsx` | Pricing page (3 cards) |
@@ -47,7 +66,8 @@ Vercel Cron (*/5 * * * *)
 | `src/app/api/v1/billing/portal/route.ts` | Stripe billing portal |
 | `src/app/api/v1/billing/webhook/route.ts` | Stripe webhook → plan flip |
 | `src/app/api/v1/usage/route.ts` | Plan + month-to-date usage |
-| `src/app/api/v1/inbound-email/route.ts` | The inbound loop handler |
+| `src/app/api/v1/inbound-email/route.ts` | Inbound: persist `pending`, return 200 |
+| `src/app/api/v1/cron/process-pending/route.ts` | Async AI-parse + dispatch worker |
 | `src/app/api/v1/cron/retry-deliveries/route.ts` | Backoff retry worker |
 | `src/app/api/v1/logs/[id]/replay/route.ts` | Manual single-log replay |
 | `src/app/api/v1/endpoints/route.ts` | List / create endpoints |
@@ -138,9 +158,20 @@ curl -u "postmark:$POSTMARK_INBOUND_WEBHOOK_TOKEN" \
   }'
 ```
 
+The response is immediate: `{ "ok": true, "status": "pending",
+"log_id": "…" }`. Nothing is parsed yet. Drain the queue by invoking
+the worker (in production Vercel Cron does this every minute):
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/cron/process-pending" \
+  -H "authorization: Bearer $CRON_SECRET"
+```
+
 Watch the parsed JSON arrive at webhook.site, then inspect
 `webhook_logs` in Supabase for the final `status`,
-`parsed_json_output`, and `http_response_code`.
+`parsed_json_output`, and `http_response_code`. A transient AI error
+leaves the row `pending` with a future `next_retry_at`; just run the
+worker again after it elapses.
 
 ## 5. Wire up real Postmark inbound
 
@@ -176,17 +207,22 @@ function verify(rawBody: string, headers: Record<string, string>, secret: string
 
 ## Failure handling
 
-Every failure point updates `webhook_logs` and still returns `200` to
-Postmark (so it does not retry an inherently undeliverable email):
+The inbound route returns `200` with `status: pending` once the email
+is durably stored (or `200` with an `error` for an unroutable
+recipient / over-quota account, so Postmark does not retry something
+inherently undeliverable). `401` is only a bad inbound token; `400`
+only a malformed JSON body; `5xx` only if the row could not be stored
+(Postmark *should* redeliver then). All parse/delivery outcomes are
+written later by the async worker:
 
 | Stage | Status written |
 | --- | --- |
-| LLM error / unparseable output | `failed_ai` |
+| Awaiting the worker | `pending` |
+| Claimed by the worker (in flight) | `processing` |
+| Transient LLM error (timeout / 429 / 5xx / flaky JSON), retries left | `pending` (backoff) |
+| LLM error, retries exhausted or hard 4xx/auth | `failed_ai` |
 | Outbound POST error / timeout / non-2xx | `failed_delivery` |
 | Delivered (2xx from your server) | `success` |
-
-`401` is returned only for a bad inbound token; `400` only for a
-malformed JSON body.
 
 ## Delivery retries (Step 2)
 
@@ -347,3 +383,38 @@ locally.
 > and is a behavioural change — and the `/self-host` commercial-licence
 > page. The current Pro plan is a clean higher quota, same hard-cap
 > semantics as Free.
+
+## Async processing queue (Step 7)
+
+The inbound handler used to parse with the LLM and POST the destination
+webhook synchronously — a slow model call or slow destination could
+exceed the Vercel serverless timeout and drop the email. It is now
+split:
+
+- **`/api/v1/inbound-email`** authenticates, validates, resolves the
+  endpoint, enforces the quota, writes one `webhook_logs` row with
+  `status = pending`, and returns `200` immediately. No outbound calls.
+- **`/api/v1/cron/process-pending`** (Vercel Cron, every minute) calls
+  `claim_pending_logs(limit, stale_minutes)` — an atomic
+  `UPDATE … FOR UPDATE SKIP LOCKED` that flips a small batch to
+  `processing`. SKIP LOCKED makes overlapping cron runs safe; the same
+  function also reclaims rows stuck in `processing` past
+  `PROCESSING_STALE_MINUTES`, so a worker that dies mid-batch
+  self-heals with no external queue/infra.
+- For each claimed row it parses with the LLM, then dispatches. A
+  **transient** AI failure (timeout, `429`, `5xx`, network, or a flaky
+  non-JSON response) is re-queued to `pending` with exponential
+  backoff via `next_retry_at`, capped at `MAX_DELIVERY_RETRIES`, then
+  `failed_ai`. A **hard** failure (other `4xx` / auth / missing
+  endpoint) goes straight to terminal `failed_ai`.
+- A successful parse that fails to deliver becomes `failed_delivery`
+  with `retry_count` reset, handed to the existing **retry-deliveries**
+  worker (AI-stage retries are not charged against delivery attempts).
+- The worker stops claiming new items ~5s before `maxDuration`; any
+  not-yet-processed claimed rows are picked up by the next run's stale
+  reaper. Tunables: `AI_PROCESS_BATCH_SIZE`, `PROCESSING_STALE_MINUTES`
+  (see `.env.example`).
+
+> Quota is still counted once, at acceptance, in the inbound route — AI
+> retries never double-count. Apply migration
+> `0004_async_processing_queue.sql` before deploying this step.
