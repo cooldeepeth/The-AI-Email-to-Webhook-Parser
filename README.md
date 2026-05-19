@@ -8,8 +8,9 @@ Implemented so far: **Step 1** the core inbound loop (schema +
 `/api/v1/inbound-email`), **Step 2** reliable delivery (automatic retry
 with exponential backoff + manual replay), **Step 3** the authenticated
 management API (endpoint CRUD, secret rotation, log inspection),
-**Step 4** the dashboard UI, and **Step 5** usage metering + monthly
-plan quotas. No landing page or Stripe billing yet.
+**Step 4** the dashboard UI, **Step 5** usage metering + monthly
+plan quotas, and **Step 6** Stripe billing (Checkout / portal / webhook
+plan-flip) behind a deliberately tiny pricing page. No landing page yet.
 
 ## Architecture
 
@@ -38,6 +39,13 @@ Vercel Cron (*/5 * * * *)
 | --- | --- |
 | `supabase/migrations/0001_initial_schema.sql` | Full Postgres DDL + RLS |
 | `supabase/migrations/0002_usage_and_plans.sql` | Plans, usage counters, quota fn |
+| `supabase/migrations/0003_billing_stripe.sql` | Stripe linkage + `set_account_plan` |
+| `src/lib/plans.ts` | The 3-plan matrix (quotas, Pro price) |
+| `src/lib/stripe.ts` | Lazy Stripe client |
+| `src/app/pricing/page.tsx` | Pricing page (3 cards) |
+| `src/app/api/v1/billing/checkout/route.ts` | Start Pro Checkout |
+| `src/app/api/v1/billing/portal/route.ts` | Stripe billing portal |
+| `src/app/api/v1/billing/webhook/route.ts` | Stripe webhook → plan flip |
 | `src/app/api/v1/usage/route.ts` | Plan + month-to-date usage |
 | `src/app/api/v1/inbound-email/route.ts` | The inbound loop handler |
 | `src/app/api/v1/cron/retry-deliveries/route.ts` | Backoff retry worker |
@@ -305,3 +313,37 @@ checked against the account's plan quota **before** any paid LLM call.
 > Quotas live in the DB (per-account), not env, so they can change
 > without a deploy. The check is intentionally before AI work so an
 > abusive or runaway sender cannot run up an API bill.
+
+## Billing (Step 6)
+
+The whole offer is **three choices** — self-host (free, this repo),
+Hosted Free (100/mo), Hosted Pro ($29/mo, 3,000/mo). Anything else
+(BYO-key quota bumps, enterprise, lifetime self-host licence) stays off
+the pricing page on purpose.
+
+- **Single source of truth:** `src/lib/plans.ts` (quotas + Pro price).
+  Only `free` and `pro` are surfaced; the `scale` enum value is reserved
+  for a future negotiated tier.
+- **Checkout:** `POST /api/v1/billing/checkout` (user JWT) creates/reuses
+  the account's Stripe customer and returns a Checkout Session `url`.
+- **Self-serve management/cancel:** `POST /api/v1/billing/portal` returns
+  a Stripe billing-portal `url`.
+- **Plan flip:** `POST /api/v1/billing/webhook` verifies the Stripe
+  signature and calls the idempotent `set_account_plan()` DB function on
+  `checkout.session.completed` (→ Pro), `customer.subscription.updated`
+  (active/trialing/past_due → Pro, else Free), and
+  `customer.subscription.deleted` (→ Free). Failures return non-2xx so
+  Stripe retries.
+
+Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and
+`STRIPE_PRO_PRICE_ID` (see `.env.example`). Create one recurring $29
+Price for the Pro product and point a webhook at
+`/api/v1/billing/webhook` for the three subscription events above; use
+`stripe listen --forward-to localhost:3000/api/v1/billing/webhook`
+locally.
+
+> **Deliberately deferred (next slice, not half-built):** per-parse
+> metered overage ($0.01) reporting to Stripe — it removes the hard cap
+> and is a behavioural change — and the `/self-host` commercial-licence
+> page. The current Pro plan is a clean higher quota, same hard-cap
+> semantics as Free.

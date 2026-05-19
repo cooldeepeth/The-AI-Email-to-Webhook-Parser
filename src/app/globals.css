@@ -184,3 +184,77 @@ pre {
   overflow: auto;
   font-size: 13px;
 }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .cards {
+    grid-template-columns: 1fr;
+  }
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+}
+.card.featured {
+  border-color: var(--accent);
+}
+.card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+.card .price {
+  font-size: 30px;
+  font-weight: 700;
+  margin: 4px 0 10px;
+}
+.card .price .per {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.card ul {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 20px;
+  font-size: 14px;
+}
+.card li {
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.card li:last-child {
+  border-bottom: 0;
+}
+.cardbtn {
+  margin-top: auto;
+  display: block;
+  text-align: center;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 16px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cardbtn:hover {
+  text-decoration: none;
+}
+.cardbtn.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.cardbtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

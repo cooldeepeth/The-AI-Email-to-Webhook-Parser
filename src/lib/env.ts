@@ -93,4 +93,25 @@ export const env = {
   get retryBatchSize() {
     return Number(optional("RETRY_BATCH_SIZE", "25"));
   },
+
+  // --- Stripe billing ---
+  get stripeSecretKey() {
+    return required("STRIPE_SECRET_KEY");
+  },
+  /** Endpoint signing secret from the Stripe webhook dashboard. */
+  get stripeWebhookSecret() {
+    return required("STRIPE_WEBHOOK_SECRET");
+  },
+  /** Recurring Price id for Hosted Pro ($29/mo). */
+  get stripeProPriceId() {
+    return required("STRIPE_PRO_PRICE_ID");
+  },
+  /**
+   * Absolute base URL for Checkout/Portal return links. Optional — the
+   * request origin is used when unset (correct for single-domain deploys).
+   */
+  get appUrl(): string | null {
+    const v = process.env.APP_URL;
+    return v && v.trim() !== "" ? v.trim().replace(/\/+$/, "") : null;
+  },
 } as const;

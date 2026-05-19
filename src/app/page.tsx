@@ -34,6 +34,7 @@ function Dashboard() {
   const [url, setUrl] = useState("");
   const [schema, setSchema] = useState("");
   const [creating, setCreating] = useState(false);
+  const [billingBusy, setBillingBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -85,6 +86,20 @@ function Dashboard() {
     router.replace("/login");
   }
 
+  async function manageBilling() {
+    setBillingBusy(true);
+    setErr(null);
+    try {
+      const { url } = await api<{ url: string }>("/api/v1/billing/portal", {
+        method: "POST",
+      });
+      window.location.href = url;
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not open billing");
+      setBillingBusy(false);
+    }
+  }
+
   return (
     <div className="wrap">
       <div className="topbar">
@@ -105,6 +120,21 @@ function Dashboard() {
               {usage.used} / {usage.monthly_quota} parsed this month (
               {usage.remaining} left)
             </span>
+          </div>
+          <div className="row" style={{ marginTop: 14 }}>
+            {usage.plan === "pro" ? (
+              <button
+                className="secondary"
+                onClick={manageBilling}
+                disabled={billingBusy}
+              >
+                {billingBusy ? "Opening…" : "Manage billing"}
+              </button>
+            ) : (
+              <Link href="/pricing">
+                <button>Upgrade to Pro</button>
+              </Link>
+            )}
           </div>
         </div>
       )}
